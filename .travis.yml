@@ -1,6 +1,6 @@
 # Travis CI build file for KituraBuddy.
 
-language: c
+#language: c
 
 branches:
   only:
@@ -28,7 +28,7 @@ matrix:
 #      sudo: required
 
 before_install:
-  - git clone https://github.com/IBM-Swift/Package-Builder.git
+#  - git clone https://github.com/IBM-Swift/Package-Builder.git
 
 script:
   - sudo apt-get update && apt-get dist-upgrade -y && apt-get install -y clang-3.8 lldb-3.8
