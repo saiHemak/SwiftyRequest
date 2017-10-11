@@ -1,5 +1,6 @@
-test:
-  image: ibmcom/swift-ubuntu:3.1.1
+# docker-compose up
+app:
+  image: ibmcom/swift-ubuntu:4.0
   volumes:
-      - .:/SwiftyRequest
-  command: bash -c "cd /SwiftyRequest && swift package clean && swift build && swift test && swift package clean"
+    - .:/SwiftyRequest
+  command: bash -c "cd /SwiftyRequest && swift package --build-path .build-ubuntu clean && swift build --build-path .build-ubuntu && swift test --build-path .build-ubuntu"
