@@ -34,5 +34,7 @@ script:
   - sudo apt-get update && sudo apt-get install -y clang-3.8 lldb-3.8
   - sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-3.8 500
   - sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-3.8 500
+  - sudo ls -la /usr/bin/clang++
+  - sido ls -la /usr/bin/clang
   - clang --version
   - ./Package-Builder/build-package.sh -projectDir $TRAVIS_BUILD_DIR
