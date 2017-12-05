@@ -27,7 +27,7 @@ public class RestRequest {
     private var request: URLRequest
 
     /// `CircuitBreaker` instance for this `RestRequest`
-    public var circuitBreaker: CircuitBreaker<(Data?, HTTPURLResponse?, Error?) -> Void, Void, String>?
+    public var circuitBreaker: CircuitBreaker<(Data?, HTTPURLResponse?, Error?) -> Void, String>?
 
     /// Parameters for a `CircuitBreaker` instance.
     /// When set, a new circuitBreaker instance is created
@@ -590,10 +590,10 @@ public class RestRequest {
     /// Method used by `CircuitBreaker` as the contextCommand
     ///
     /// - Parameter invocation: `Invocation` contains a command argument, Void return type, and a String fallback arguement
-    private func handleInvocation(invocation: Invocation<(Data?, HTTPURLResponse?, Error?) -> Void, Void, String>) {
+    private func handleInvocation(invocation: Invocation<(Data?, HTTPURLResponse?, Error?) -> Void, String>) {
         let task = session.dataTask(with: request) { (data, response, error) in
             if error != nil {
-                invocation.notifyFailure()
+                invocation.notifyFailure(error: BreakerError.networkingError)
             } else {
                 invocation.notifySuccess()
             }
@@ -739,4 +739,8 @@ public enum RestError: Error, CustomStringConvertible {
         default: return nil
         }
     }
+}
+
+public extension BreakerError {
+  public static let networkingError = BreakerError(reason: "Error repsonse from request")
 }
