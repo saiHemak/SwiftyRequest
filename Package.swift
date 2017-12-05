@@ -27,7 +27,7 @@ let package = Package(
         )
     ],
     dependencies: [
-      .package(url: "https://github.com/IBM-Swift/CircuitBreaker.git", .branch("errorHandling"))
+      .package(url: "https://github.com/IBM-Swift/CircuitBreaker.git", .branch("swiftMetrics"))
     ],
     targets: [
         .target(
