@@ -189,9 +189,12 @@ public class RestRequest {
             breaker.run(commandArgs: completionHandler, fallbackArgs: "Circuit is open")
         } else {
             let task = session.dataTask(with: request) { (data, response, error) in
-                print("Data:", data ?? "is nil")
-                print("Response:", response ?? "is nil")
-                print("Error:", error ?? "is nil")
+                let dataResult = data == nil ? "There is not data" : "There is data"
+                let responseResult = response == nil ? "There is not a response" : "There is a response"
+                let errorResult = error == nil ? "There is not an error" : "There is an error"
+                print(dataResult, data ?? "")
+                print(responseResult, response ?? "")
+                print(errorResult, error ?? "")
                 guard error == nil, let response = response as? HTTPURLResponse else {
                     completionHandler(nil, nil, error)
                     return
