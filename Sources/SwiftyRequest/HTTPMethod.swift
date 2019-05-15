@@ -18,7 +18,7 @@ import Foundation
 
 /// An enum to describe the HTTP method (Get, Post, Put, Delete, etc) of an HTTP
 /// request. In general they match the actual HTTP methods by the same name.
-public enum HTTPMethod: String {
+public enum HTTPMethodOne: String {
     /// Signifies that the particular path mapping is not dependent on the HTTP method
     case all = "ALL"
 
@@ -108,12 +108,12 @@ public enum HTTPMethod: String {
     ///
     /// - Parameter fromRawValue: The string form of an HTTP method to convert to an `HTTPMethod` enum.
     init(fromRawValue: String) {
-        self = HTTPMethod(rawValue: fromRawValue) ?? .unknown
+        self = HTTPMethodOne(rawValue: fromRawValue) ?? .unknown
     }
 }
 
 // MARK: CustomStringConvertible extension
-extension HTTPMethod: CustomStringConvertible {
+extension HTTPMethodOne: CustomStringConvertible {
     /// String format of an `HTTPMethod` instance.
     public var description: String {
         return self.rawValue

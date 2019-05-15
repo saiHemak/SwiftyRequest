@@ -2,7 +2,7 @@
  * Copyright IBM Corporation 2016,2017
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
+ * you may not use this kfile except in compliance with the License.
  * You may obtain a copy of the License at
  *
  * http://www.apache.org/licenses/LICENSE-2.0
@@ -17,20 +17,14 @@
 import Foundation
 import CircuitBreaker
 import LoggerAPI
+import NIOHTTPClient
+import NIO
+import NIOHTTP1
+import NIOSSL
 
 /// Object containing everything needed to build and execute HTTP requests.
 public class RestRequest: NSObject  {
 
-    deinit {
-        #if swift(>=4.1)
-        if session != URLSession.shared {
-            session.finishTasksAndInvalidate()
-        }
-        #else
-        session.finishTasksAndInvalidate()
-        #endif
-    }
-    
     // Check if there exists a self-signed certificate and whether it's a secure connection
     private let isSecure: Bool
     private let isSelfSigned: Bool
@@ -38,19 +32,12 @@ public class RestRequest: NSObject  {
     // The client certificate for 2-way SSL
     private let clientCertificate: ClientCertificate?
 
-    /// A default `URLSession` instance.
-    #if swift(>=4.1)
-    private var session: URLSession = URLSession.shared
-    #else
-    private var session: URLSession = URLSession(configuration: URLSessionConfiguration.default)
-    #endif
-
     // The HTTP Request
-    private var request: URLRequest
+    private var request: HTTPClient.Request?
 
     /// The currently configured `CircuitBreaker` instance for this `RestRequest`. In order to create a
     /// `CircuitBreaker` you should set the `circuitParameters` property.
-    public var circuitBreaker: CircuitBreaker<(Data?, HTTPURLResponse?, Error?) -> Void, String>?
+    public var circuitBreaker: CircuitBreaker<(Data?, HTTPClient.Response?, Error?) -> Void, String>?
 
     /// Parameters for a `CircuitBreaker` instance.
     /// When these parameters are set, a new `circuitBreaker` instance is created.
@@ -81,6 +68,10 @@ public class RestRequest: NSObject  {
         }
     }
 
+    /// TLS Configuration
+    var sslConfig: TLSConfiguration?
+
+    private var sslContext: NIOSSLContext?
     // MARK: HTTP Request Parameters
     /// URL `String` used to store a url containing replaceable template values.
     private var urlTemplate: String?
@@ -96,10 +87,10 @@ public class RestRequest: NSObject  {
     /// ```
     public var method: HTTPMethod {
         get {
-            return HTTPMethod(fromRawValue: request.httpMethod ?? "unknown")
+            return request?.method ?? .GET
         }
         set {
-            request.httpMethod = newValue.rawValue
+            request?.method = newValue
         }
     }
 
@@ -121,14 +112,14 @@ public class RestRequest: NSObject  {
                 switch credentials {
                 case .apiKey: break
                 case .bearerAuthentication(let token):
-                    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                    request?.headers.replaceOrAdd(name: "Authorization", value: "Bearer \(token)")
                 case .basicAuthentication(let username, let password):
                     let authData = (username + ":" + password).data(using: .utf8)!
                     let authString = authData.base64EncodedString()
-                    request.setValue("Basic \(authString)", forHTTPHeaderField: "Authorization")
+                    request?.headers.replaceOrAdd(name: "Authorization", value: "Basic \(authString)")
                 }
             } else {
-                request.setValue(nil, forHTTPHeaderField: "Authorization")
+                request?.headers.replaceOrAdd(name: "Authorization", value: "")
             }
         }
     }
@@ -146,15 +137,19 @@ public class RestRequest: NSObject  {
     /// ```
     public var headerParameters: [String: String] {
         get {
-            return request.allHTTPHeaderFields ?? [:]
+            var headers: [String: String] = [:]
+            for header in request?.headers ?? [:] {
+                headers[header.name] = header.value
+            }
+            return headers
         }
         set {
             // Remove any header fields external to the RestRequest supported headers
             let s: Set<String> = ["Authorization", "Accept", "Content-Type", "User-Agent"]
-            _ = request.allHTTPHeaderFields?.map { key, value in if !s.contains(key) { request.setValue(nil, forHTTPHeaderField: key) } }
+            _ = request?.headers.map { key, value in if !s.contains(key) { request?.headers.add(name: key, value: "") } }
             // Add new header parameters
             for (key, value) in newValue {
-                request.setValue(value, forHTTPHeaderField: key)
+                request?.headers.replaceOrAdd(name: key, value: value)
             }
         }
     }
@@ -168,10 +163,10 @@ public class RestRequest: NSObject  {
     /// ```
     public var acceptType: String? {
         get {
-            return request.value(forHTTPHeaderField: "Accept")
+            return request?.headers.filter {$0.name == "Accept"}.map { $0.value }.first
         }
         set {
-            request.setValue(newValue, forHTTPHeaderField: "Accept")
+            request?.headers.add(name: "Accept", value: newValue ?? "")
         }
     }
 
@@ -184,10 +179,10 @@ public class RestRequest: NSObject  {
     /// ```
     public var contentType: String? {
         get {
-            return request.value(forHTTPHeaderField: "Content-Type")
+            return request?.headers.filter {$0.name == "Content-Type"}.map { $0.value }.first
         }
         set {
-            request.setValue(newValue, forHTTPHeaderField: "Content-Type")
+            request?.headers.replaceOrAdd(name: "Content-Type", value: newValue as! String)
         }
     }
 
@@ -201,10 +196,10 @@ public class RestRequest: NSObject  {
     /// ```
     public var productInfo: String? {
         get {
-            return request.value(forHTTPHeaderField: "User-Agent")
+            return request?.headers.filter {$0.name == "User-Agent"}.map { $0.value }.first
         }
         set {
-            request.setValue(newValue?.generateUserAgent(), forHTTPHeaderField: "User-Agent")
+            request?.headers.replaceOrAdd(name: "User-Agent", value: newValue!.generateUserAgent())
         }
     }
 
@@ -216,10 +211,22 @@ public class RestRequest: NSObject  {
     /// ``
     public var messageBody: Data? {
         get {
-            return request.httpBody
+            if let body = request?.body {
+                switch body {
+                case .byteBuffer(let buffer):
+                    return buffer.withUnsafeReadableBytes {
+                        Data(bytes: $0.baseAddress!, count: $0.count)
+                    }
+                case .string(let str):
+                    return Data(str.utf8)
+                case .data(let data):
+                return data
+            }
+            }
+            return nil
         }
         set {
-            request.httpBody = newValue
+            request?.body = HTTPClient.Body.data(newValue!)
         }
     }
 
@@ -236,18 +243,18 @@ public class RestRequest: NSObject  {
     public var queryItems: [URLQueryItem]?  {
         set {
             // Replace queryitems on request.url with new queryItems
-            if let currentURL = request.url, var urlComponents = URLComponents(url: currentURL, resolvingAgainstBaseURL: false) {
-                urlComponents.queryItems = newValue
+            var urlComponents = URLComponents(url: URL(string: url)! , resolvingAgainstBaseURL: false)
+            urlComponents?.queryItems = newValue
                 // Must encode "+" to %2B (URLComponents does not do this)
-                urlComponents.percentEncodedQuery = urlComponents.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
-                request.url = urlComponents.url
-            }
+            let queryParam = urlComponents?.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+            urlComponents?.percentEncodedQuery = queryParam
+            request?.url = urlComponents!.url!
+
         }
         get {
-            if let currentURL = request.url, var urlComponents = URLComponents(url: currentURL, resolvingAgainstBaseURL: false) {
-                return urlComponents.queryItems
-            }
-            return nil
+            guard let currentURL = request?.url else { return nil }
+            var urlComponents = URLComponents(url: currentURL, resolvingAgainstBaseURL: false)
+            return urlComponents!.queryItems!
         }
     }
 
@@ -263,31 +270,24 @@ public class RestRequest: NSObject  {
     ///   - url: URL string to use for the network request.
     ///   - containsSelfSignedCert: Pass `True` to use self signed certificates.
     ///   - clientCertificate: Pass in `ClientCertificate` with the certificate name and path to use client certificates for 2-way SSL.
-    public init(method: HTTPMethod = .get, url: String, containsSelfSignedCert: Bool? = false, clientCertificate: ClientCertificate? = nil) {
+    public init(method: HTTPMethod = .GET, url: String, containsSelfSignedCert: Bool? = false, clientCertificate: ClientCertificate? = nil) {
 
         self.isSecure = url.hasPrefix("https")
         self.isSelfSigned = containsSelfSignedCert ?? false
         self.clientCertificate = clientCertificate
-
-        // Instantiate basic mutable request
-        let urlComponents = URLComponents(string: url) ?? URLComponents(string: "")!
-        let urlObject = urlComponents.url ?? URL(string: "n/a")!
-        self.request = URLRequest(url: urlObject)
-
-        // Set initial fields
         self.url = url
+        // Instantiate basic mutable request
+        self.request = try? HTTPClient.Request(url: url , method: method)
+        self.url = url
+        // Set initial fields
 
         super.init()
-
-        if isSecure && isSelfSigned {
-            let config = URLSessionConfiguration.default
-            config.requestCachePolicy = .reloadIgnoringLocalCacheData
-            session = URLSession(configuration: config, delegate: self, delegateQueue: .main)
-        }
-        
         self.method = method
         self.acceptType = "application/json"
         self.contentType = "application/json"
+        if isSecure && isSelfSigned {
+            self.sslConfig = TLSConfiguration.forClient(certificateVerification: .none)
+        }
 
         // We accept URLs with templated values which `URLComponents` does not treat as valid
         if URLComponents(string: url) == nil {
@@ -299,26 +299,39 @@ public class RestRequest: NSObject  {
     /// Request response method that either invokes `CircuitBreaker` or executes the HTTP request.
     ///
     /// - Parameter completionHandler: Callback used on completion of operation.
-    public func response(completionHandler: @escaping (Data?, HTTPURLResponse?, Error?) -> Void) {
+    public func response(completionHandler: @escaping (Data?, HTTPClient.Response?, Error?) -> Void) {
         if let breaker = circuitBreaker {
             breaker.run(commandArgs: completionHandler, fallbackArgs: "Circuit is open")
         } else {
-            let task = session.dataTask(with: request) { (data, response, error) in
-                guard error == nil, let response = response as? HTTPURLResponse else {
+            let httpClient = HTTPClient(eventLoopGroupProvider: .createNew)
+            if let req = self.request {
+                httpClient.execute(request: req).whenComplete { result in
+                switch result {
+                case .failure(let error):
                     completionHandler(nil, nil, error)
-                    return
+                case .success(let response):
+                    let code = response.status.code
+                    guard let responseBody = response.body else {
+                        completionHandler(nil, nil, RestError.erroredResponseStatus(Int(code)))
+                        return
+                    }
+                    let bytes = responseBody.withUnsafeReadableBytes {
+                        Data(bytes: $0.baseAddress!, count: $0.count)
+                    }
+                    if code >= 200 && code < 300 {
+                        completionHandler(bytes, response, nil)
+                    } else {
+                        completionHandler(bytes,
+                                          response,
+                                          RestError.erroredResponseStatus(Int(code)))
+                    }
+                    }
+                    try? httpClient.syncShutdown()
                 }
 
-                let code = response.statusCode
-                if code >= 200 && code < 300 {
-                    completionHandler(data, response, error)
-                } else {
-                    completionHandler(data,
-                                      response,
-                                      RestError.erroredResponseStatus(code))
-                }
+            } else {
+                completionHandler(nil, nil, RestError.erroredResponseStatus(400))
             }
-            task.resume()
         }
     }
 
@@ -375,7 +388,7 @@ public class RestRequest: NSObject  {
     ///   - queryItems: Sets the query parameters for this RestRequest, overwriting any existing parameters. Defaults to `nil`, which means that this parameter will be ignored, and `RestRequest.queryItems` will be used instead. Note that if you wish to clear any existing query parameters, then you should set `request.queryItems = nil` before calling this function.
     ///   - completionHandler: Callback used on completion of operation.
     public func responseObject<T: JSONDecodable>(
-        responseToError: ((HTTPURLResponse?, Data?) -> Error?)? = nil,
+        responseToError: ((HTTPClient.Response?, Data?) -> Error?)? = nil,
         path: [JSONPathType]? = nil,
         templateParams: [String: String]? = nil,
         queryItems: [URLQueryItem]? = nil,
@@ -456,7 +469,7 @@ public class RestRequest: NSObject  {
     ///   - queryItems: Sets the query parameters for this RestRequest, overwriting any existing parameters. Defaults to `nil`, which means that this parameter will be ignored, and `RestRequest.queryItems` will be used instead. Note that if you wish to clear any existing query parameters, then you should set `request.queryItems = nil` before calling this function.
     ///   - completionHandler: Callback used on completion of operation.
     public func responseObject<T: Decodable>(
-        responseToError: ((HTTPURLResponse?, Data?) -> Error?)? = nil,
+        responseToError: ((HTTPClient.Response?, Data?) -> Error?)? = nil,
         templateParams: [String: String]? = nil,
         queryItems: [URLQueryItem]? = nil,
         completionHandler: @escaping (RestResponse<T>) -> Void) {
@@ -515,7 +528,7 @@ public class RestRequest: NSObject  {
     ///   - queryItems: Sets the query parameters for this RestRequest, overwriting any existing parameters. Defaults to `nil`, which means that this parameter will be ignored, and `RestRequest.queryItems` will be used instead. Note that if you wish to clear any existing query parameters, then you should set `request.queryItems = nil` before calling this function.
     ///   - completionHandler: Callback used on completion of operation.
     public func responseArray<T: JSONDecodable>(
-        responseToError: ((HTTPURLResponse?, Data?) -> Error?)? = nil,
+        responseToError: ((HTTPClient.Response?, Data?) -> Error?)? = nil,
         path: [JSONPathType]? = nil,
         templateParams: [String: String]? = nil,
         queryItems: [URLQueryItem]? = nil,
@@ -597,7 +610,7 @@ public class RestRequest: NSObject  {
     ///   - queryItems: Sets the query parameters for this RestRequest, overwriting any existing parameters. Defaults to `nil`, which means that this parameter will be ignored, and `RestRequest.queryItems` will be used instead. Note that if you wish to clear any existing query parameters, then you should set `request.queryItems = nil` before calling this function.
     ///   - completionHandler: Callback used on completion of operation.
     public func responseString(
-        responseToError: ((HTTPURLResponse?, Data?) -> Error?)? = nil,
+        responseToError: ((HTTPClient.Response?, Data?) -> Error?)? = nil,
         templateParams: [String: String]? = nil,
         queryItems: [URLQueryItem]? = nil,
         completionHandler: @escaping (RestResponse<String>) -> Void) {
@@ -641,7 +654,7 @@ public class RestRequest: NSObject  {
             }
 
             // Retrieve string encoding type
-            let encoding = self.getCharacterEncoding(from: response?.allHeaderFields["Content-Type"] as? String)
+            let encoding = self.getCharacterEncoding(from: (response?.headers.filter { $0.name == "Content-Type"}.first)?.value)
 
             // parse data as a string
             guard let string = String(data: data, encoding: encoding) else {
@@ -666,7 +679,7 @@ public class RestRequest: NSObject  {
     ///   - queryItems: Sets the query parameters for this RestRequest, overwriting any existing parameters. Defaults to `nil`, which means that this parameter will be ignored, and `RestRequest.queryItems` will be used instead. Note that if you wish to clear any existing query parameters, then you should set `request.queryItems = nil` before calling this function.
     ///   - completionHandler: Callback used on completion of operation.
     public func responseVoid(
-        responseToError: ((HTTPURLResponse?, Data?) -> Error?)? = nil,
+        responseToError: ((HTTPClient.Response?, Data?) -> Error?)? = nil,
         templateParams: [String: String]? = nil,
         queryItems: [URLQueryItem]? = nil,
         completionHandler: @escaping (RestResponse<Void>) -> Void) {
@@ -712,38 +725,51 @@ public class RestRequest: NSObject  {
     /// - Parameters:
     ///   - destination: URL destination to save the file to.
     ///   - completionHandler: Callback used on completion of the operation.
-    public func download(to destination: URL, completionHandler: @escaping (HTTPURLResponse?, Error?) -> Void) {
-        let task = session.downloadTask(with: request) { (source, response, error) in
-            do {
-                guard let source = source else {
-                    throw RestError.invalidFile
+    public func download(to destination: URL, completionHandler: @escaping (HTTPClient.Response?, Error?) -> Void) {
+        let httpClient = HTTPClient(eventLoopGroupProvider: .createNew)
+        if let request = self.request {
+            httpClient.execute(request: request).whenComplete { result in
+                switch result {
+                case .failure:
+                    completionHandler(nil, RestError.fileManagerError)
+                case .success(let response):
+                    let bytes = response.body!.withUnsafeReadableBytes {
+                            Data(bytes: $0.baseAddress!, count: $0.count)
+                        }
+                    let fileManager = FileManager.default
+                    fileManager.createFile(atPath: destination.path, contents: bytes, attributes:nil)
+                    completionHandler(response , nil)
                 }
-                let fileManager = FileManager.default
-                try fileManager.moveItem(at: source, to: destination)
-
-                completionHandler(response as? HTTPURLResponse, error)
-
-            } catch {
-                completionHandler(nil, RestError.fileManagerError)
+            try? httpClient.syncShutdown()
             }
         }
-        task.resume()
+
     }
 
     /// Method used by `CircuitBreaker` as the contextCommand.
     ///
     /// - Parameter invocation: `Invocation` contains a command argument, `Void` return type, and a `String` fallback arguement.
-    private func handleInvocation(invocation: Invocation<(Data?, HTTPURLResponse?, Error?) -> Void, String>) {
-        let task = session.dataTask(with: request) { (data, response, error) in
-            if error != nil {
-                invocation.notifyFailure(error: BreakerError(reason: error?.localizedDescription))
-            } else {
+    private func handleInvocation(invocation: Invocation<(Data?, HTTPClient.Response?, Error?) -> Void, String>) {
+        let httpClient = HTTPClient(eventLoopGroupProvider: .createNew)
+        if let req = self.request {
+        httpClient.execute(request: req).whenComplete { result in
+            switch result {
+            case .failure(let error):
+                invocation.notifyFailure(error: BreakerError(reason: error.localizedDescription))
+            case .success(let response):
                 invocation.notifySuccess()
+                let bytes = response.body!.withUnsafeReadableBytes {
+                    Data(bytes: $0.baseAddress!, count: $0.count)
+                }
+                let callback = invocation.commandArgs
+                callback(bytes, response, nil)
             }
-            let callback = invocation.commandArgs
-            callback(data, response as? HTTPURLResponse, error)
+            try? httpClient.syncShutdown()
         }
-        task.resume()
+        } else {
+            invocation.notifyFailure(error: BreakerError(reason: "Request nil"))
+        }
+
 
     }
 
@@ -756,7 +782,6 @@ public class RestRequest: NSObject  {
         guard let params = params else {
             return nil
         }
-
         // Get urlTemplate if available, otherwise just use the request's url
         let urlString = (self.urlTemplate ?? self.url).expandString(params: params)
 
@@ -766,7 +791,7 @@ public class RestRequest: NSObject  {
         }
 
         // Replace the unexpanded URL with the expanded one.
-        self.request.url = urlComponents.url
+        self.request?.url = urlComponents.url!
         self.url = urlString
 
         return nil
@@ -836,10 +861,10 @@ public struct CircuitParameters<A> {
 public struct RestResponse<T> {
 
     /// The rest request.
-    public let request: URLRequest?
+    public let request: HTTPClient.Request?
 
     /// The response to the request.
-    public let response: HTTPURLResponse?
+    public let response: HTTPClient.Response?
 
     /// The Response Data.
     public let data: Data?

@@ -1,5 +1,8 @@
 import XCTest
 import CircuitBreaker
+
+@testable import NIOHTTP1
+@testable import NIOHTTPClient
 @testable import SwiftyRequest
 
 /// URLs for the local test server that these tests use. The TLS certificate
@@ -81,23 +84,23 @@ class SwiftyRequestTests: XCTestCase {
 
     // Enable logging output for tests
     override func setUp() {
-        PrintLogger.use(colored: true)
+      //  PrintLogger.use(colored: true)
     }
 
     // MARK: Helper methods
 
-    private func responseToError(response: HTTPURLResponse?, data: Data?) -> Error? {
+    private func responseToError(response: HTTPClient.Response?, data: Data?) -> Error? {
 
         // First check http status code in response
         if let response = response {
-            if response.statusCode >= 200 && response.statusCode < 300 {
+            if response.status.code >= 200 && response.status.code < 300 {
                 return nil
             }
         }
 
         // ensure data is not nil
         guard let data = data else {
-            if let code = response?.statusCode {
+            if let code = response?.status.code {
                 print("Data is nil with response code: \(code)")
                 return RestError.noData
             }
@@ -127,8 +130,8 @@ class SwiftyRequestTests: XCTestCase {
     func testInsecureConnection() {
         let expectation = self.expectation(description: "Insecure Connection test")
         
-        let request = RestRequest(method: .get, url: insecureUrl)
-        
+        let request = RestRequest(method: .GET, url: insecureUrl)
+        print(request.headerParameters)
         request.response { (data, response, error) in
             if error != nil {
                 XCTFail("Could not receive request")
@@ -136,7 +139,7 @@ class SwiftyRequestTests: XCTestCase {
             expectation.fulfill()
         }
         
-        waitForExpectations(timeout: 20)
+        waitForExpectations(timeout: 50)
     }
     
     func testEchoData() {
@@ -149,9 +152,8 @@ class SwiftyRequestTests: XCTestCase {
             return
         }
 
-        let request = RestRequest(method: .post, url: echoURL)
+        let request = RestRequest(method: .POST, url: echoURL)
         request.messageBody = data
-
         request.responseData { response in
             switch response.result {
             case .success(let retval):
@@ -173,8 +175,7 @@ class SwiftyRequestTests: XCTestCase {
     func testGetValidCert() {
         let expectation = self.expectation(description: "Connection successful")
 
-        let request = RestRequest(method: .get, url: sslValidCertificateURL)
-
+        let request = RestRequest(method: .GET, url: sslValidCertificateURL)
         request.responseData { response in
             switch response.result {
             case .success(let retval):
@@ -196,7 +197,7 @@ class SwiftyRequestTests: XCTestCase {
         let expectation = self.expectation(description: "Data Echoed Back")
         let testClientCertificate = ClientCertificate(name: "server.csr", path: "Tests/SwiftyRequestTests/Certificates")
         
-        let request = RestRequest(method: .get, url: jsonURL, containsSelfSignedCert: true, clientCertificate: testClientCertificate)
+        let request = RestRequest(method: .POST, url: jsonURL, containsSelfSignedCert: true, clientCertificate: testClientCertificate)
         
         request.responseData { response in
             switch response.result {
@@ -327,18 +328,18 @@ class SwiftyRequestTests: XCTestCase {
 
     }
 
-    func assertCharsetISO8859(response: HTTPURLResponse?) {
-        guard let text = response?.allHeaderFields["Content-Type"] as? String,
+    func assertCharsetISO8859(response: HTTPClient.Response?) {
+        guard let text = (response?.headers.filter {$0.name == "Content-Type"})?.first?.value,
             let regex = try? NSRegularExpression(pattern: "(?<=charset=).*?(?=$|;|\\s)", options: [.caseInsensitive]),
             let match = regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).last,
             let range = Range(match.range, in: text) else {
-                XCTFail("Test no longer valid using URL: \(response?.url?.absoluteString ?? ""). The charset field was not provided.")
+                XCTFail("Test no longer valid using URL: \(response?.host ). The charset field was not provided.")
                 return
         }
 
         let str = String(text[range]).trimmingCharacters(in: CharacterSet(charactersIn: "\"").union(.whitespaces))
         if String(str).lowercased() != "iso-8859-1" {
-          XCTFail("Test no longer valid using URL: \(response?.url?.absoluteString ?? ""). The charset field was not provided.")
+          XCTFail("Test no longer valid using URL: \(response?.host ). The charset field was not provided.")
         }
     }
 
@@ -412,7 +413,7 @@ class SwiftyRequestTests: XCTestCase {
         request.download(to: destinationURL) { response, error in
             XCTAssertNil(error) // if error not nil, url may point to missing resource
             XCTAssertNotNil(response)
-            XCTAssertEqual(response?.statusCode, 200)
+            XCTAssertEqual(response?.status.code, 200)
 
             do {
                 // Clean up downloaded file
@@ -437,10 +438,11 @@ class SwiftyRequestTests: XCTestCase {
 
         request.responseString(responseToError: responseToError) { response in
 
-            XCTAssertNotNil(response.request?.allHTTPHeaderFields)
-            if let headers = response.request?.allHTTPHeaderFields {
-                XCTAssertNotNil(headers["User-Agent"])
-                XCTAssertEqual(headers["User-Agent"], "swiftyrequest-sdk/0.2.0".generateUserAgent())
+            XCTAssertNotNil(response.request?.headers)
+            if let headers = response.request?.headers {
+                let userAgent = response.request?.headers.filter {$0.name == "User-Agent"}.map { $0.value }.first
+                XCTAssertNotNil(userAgent)
+                XCTAssertEqual(userAgent, "swiftyrequest-sdk/0.2.0".generateUserAgent())
             }
 
             switch response.result {
@@ -667,8 +669,8 @@ class SwiftyRequestTests: XCTestCase {
             switch response.result {
             case .success(let result):
                 XCTAssertGreaterThan(result.count, 0)
-                XCTAssertNotNil(response.request?.url?.query)
-                if let queryItems = response.request?.url?.query {
+                XCTAssertNotNil(response.request?.url.query)
+                if let queryItems = response.request?.url.query {
                     XCTAssertEqual(queryItems, "friend=brian&friend=george&friend=melissa%2Btempe&friend=mika")
                 }
             case .failure(let error):
@@ -682,7 +684,7 @@ class SwiftyRequestTests: XCTestCase {
             switch response.result {
             case .success(let result):
                 XCTAssertGreaterThan(result.count, 0)
-                XCTAssertNil(response.request?.url?.query)
+                XCTAssertNil(response.request?.url.query)
                 let queryItems = [URLQueryItem(name: "friend", value: "brian"), URLQueryItem(name: "friend", value: "george"), URLQueryItem(name: "friend", value: "melissa+tempe"), URLQueryItem(name: "friend", value: "mika")]
                 request.responseData(queryItems: queryItems, completionHandler: completionHandlerFour)
             case .failure(let error):
@@ -695,8 +697,8 @@ class SwiftyRequestTests: XCTestCase {
             switch response.result {
             case .success(let result):
                 XCTAssertGreaterThan(result.count, 0)
-                XCTAssertNotNil(response.request?.url?.query)
-                if let queryItems = response.request?.url?.query {
+                XCTAssertNotNil(response.request?.url.query)
+                if let queryItems = response.request?.url.query {
                     XCTAssertEqual(queryItems, "friend=darren%2Bfink")
                 }
                 // Explicitly remove query items before next request
@@ -712,8 +714,8 @@ class SwiftyRequestTests: XCTestCase {
             switch response.result {
             case .success(let retVal):
                 XCTAssertGreaterThan(retVal.count, 0)
-                XCTAssertNotNil(response.request?.url?.query)
-                if let queryItems = response.request?.url?.query {
+                XCTAssertNotNil(response.request?.url.query)
+                if let queryItems = response.request?.url.query {
                     XCTAssertEqual(queryItems, "friend=bill")
                 }
 
@@ -749,8 +751,8 @@ class SwiftyRequestTests: XCTestCase {
             switch response.result {
             case .success(let result):
                 XCTAssertEqual(result.friends.count, 4)
-                XCTAssertNotNil(response.request?.url?.query)
-                if let queryItems = response.request?.url?.query {
+                XCTAssertNotNil(response.request?.url.query)
+                if let queryItems = response.request?.url.query {
                     XCTAssertEqual(queryItems, "friend=brian&friend=george&friend=melissa%2Btempe&friend=mika")
                 }
             case .failure(let error):
@@ -764,7 +766,7 @@ class SwiftyRequestTests: XCTestCase {
             switch response.result {
             case .success(let result):
                 XCTAssertEqual(result.friends.count, 0)
-                XCTAssertNil(response.request?.url?.query)
+                XCTAssertNil(response.request?.url.query)
                 let queryItems = [URLQueryItem(name: "friend", value: "brian"), URLQueryItem(name: "friend", value: "george"), URLQueryItem(name: "friend", value: "melissa+tempe"), URLQueryItem(name: "friend", value: "mika")]
                 request.responseObject(queryItems: queryItems, completionHandler: completionHandlerFour)
             case .failure(let error):
@@ -778,8 +780,8 @@ class SwiftyRequestTests: XCTestCase {
             switch response.result {
             case .success(let result):
                 XCTAssertEqual(result.friends.count, 1)
-                XCTAssertNotNil(response.request?.url?.query)
-                if let queryItems = response.request?.url?.query {
+                XCTAssertNotNil(response.request?.url.query)
+                if let queryItems = response.request?.url.query {
                     XCTAssertEqual(queryItems, "friend=darren%2Bfink")
                 }
                 // Explicitly remove query items before next request
@@ -796,8 +798,8 @@ class SwiftyRequestTests: XCTestCase {
             switch response.result {
             case .success(let retVal):
                 XCTAssertEqual(retVal.friends.count, 1)
-                XCTAssertNotNil(response.request?.url?.query)
-                if let queryItems = response.request?.url?.query {
+                XCTAssertNotNil(response.request?.url.query)
+                if let queryItems = response.request?.url.query {
                     XCTAssertEqual(queryItems, "friend=bill")
                 }
                 
@@ -832,8 +834,8 @@ class SwiftyRequestTests: XCTestCase {
             switch response.result {
             case .success(let retVal):
                 XCTAssertGreaterThan(retVal.count, 0)
-                XCTAssertNotNil(response.request?.url?.query)
-                if let queryItems = response.request?.url?.query {
+                XCTAssertNotNil(response.request?.url.query)
+                if let queryItems = response.request?.url.query {
                     XCTAssertEqual(queryItems, "friend=bill")
                 }
             case .failure(let error):
@@ -864,8 +866,8 @@ class SwiftyRequestTests: XCTestCase {
             switch response.result {
             case .success(let retVal):
                 XCTAssertEqual(retVal.name, "Bananaman")
-                XCTAssertNotNil(response.request?.url?.query)
-                if let queryItems = response.request?.url?.query {
+                XCTAssertNotNil(response.request?.url.query)
+                if let queryItems = response.request?.url.query {
                     XCTAssertEqual(queryItems, "friend=bill")
                 }
             case .failure(let error):
